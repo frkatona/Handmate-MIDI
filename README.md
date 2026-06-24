@@ -2,6 +2,8 @@ Handmate-MIDI - we recommend using Google Chrome, Firefox or Microsoft Edge as w
 
 UPDATE: There is an OFFLINE version available here: https://github.com/monlim/Handmate-MIDI-Offline
 
+Base project creator: https://github.com/monlim/
+
 The MidiTest MaxMSP patch is included here as an example of how to get the MIDI information from the web browser.
 
 YouTube Demo: https://youtu.be/H97t17Q_BbM
