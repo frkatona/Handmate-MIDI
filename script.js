@@ -621,8 +621,12 @@ const videoSelect = document.querySelector("select#videoSource");
 const selectors = [videoSelect];
 const canvasElement = document.getElementsByClassName("output_canvas")[0];
 const canvasCtx = canvasElement.getContext("2d");
+const fxBufferCanvas = document.createElement("canvas");
+const fxBufferCtx = fxBufferCanvas.getContext("2d");
 const showTracking = document.getElementById("showTracking");
 const showOverlayFx = document.getElementById("showOverlayFx");
+const showExcessiveFx = document.getElementById("showExcessiveFx");
+const excessiveFxRow = document.getElementById("excessiveFxRow");
 const selfie = document.getElementById("selfie");
 const fpsoutput = document.getElementById("fps");
 const gesture = document.getElementById("gesture");
@@ -669,6 +673,17 @@ let maxVal = Number(sliderMaxValueInput.value);
 let midiPitchControlValue = 60;
 let midiVel = 1;
 let activeControlKeys = new Set();
+let currentFxSignalLevel = 0;
+let smoothedFxSignalLevel = 0;
+
+function syncOverlayFxControls() {
+  const enabled = Boolean(showOverlayFx?.checked);
+  if (excessiveFxRow) excessiveFxRow.hidden = !enabled;
+  if (!enabled && showExcessiveFx) showExcessiveFx.checked = false;
+}
+
+showOverlayFx?.addEventListener("change", syncOverlayFxControls);
+syncOverlayFxControls();
 
 function setMidiStatus(ready, title) {
   midiStatus.classList.toggle("is-ready", Boolean(ready));
@@ -1114,10 +1129,13 @@ function setControlFeedback(selectElement, value, isActive) {
   if (!row) return;
 
   row.classList.toggle("is-active", isActive);
-  updateRouteRangeVisual(row, selectElement, isActive ? clamp(value, 0, 1) : 0);
+  const safeValue = isActive ? clamp(value, 0, 1) : 0;
+  if (isActive) currentFxSignalLevel = Math.max(currentFxSignalLevel, safeValue);
+  updateRouteRangeVisual(row, selectElement, safeValue);
 }
 
 function resetControlFeedback() {
+  currentFxSignalLevel = 0;
   controls_io.forEach((io) => setControlFeedback(io.in, 0, false));
   if (noteRouteInput) setControlFeedback(noteRouteInput, 0, false);
   streamRow.classList.remove("is-active");
@@ -1126,6 +1144,7 @@ function resetControlFeedback() {
 
 function myMidi(hands) {
   activeControlKeys = new Set();
+  currentFxSignalLevel = 0;
 
   if (midiVelInput.value === "nil") {
     midiVel = 1;
@@ -1409,6 +1428,22 @@ function colorWithAlpha(hexColor, alpha) {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
+function syncFxBufferSize() {
+  if (fxBufferCanvas.width !== canvasElement.width) fxBufferCanvas.width = canvasElement.width;
+  if (fxBufferCanvas.height !== canvasElement.height) fxBufferCanvas.height = canvasElement.height;
+}
+
+function captureFxBuffer() {
+  syncFxBufferSize();
+  fxBufferCtx.clearRect(0, 0, fxBufferCanvas.width, fxBufferCanvas.height);
+  fxBufferCtx.drawImage(canvasElement, 0, 0);
+}
+
+function updateSmoothedFxSignalLevel() {
+  smoothedFxSignalLevel += (currentFxSignalLevel - smoothedFxSignalLevel) * 0.22;
+  return clamp(smoothedFxSignalLevel, 0, 1);
+}
+
 function drawSparkle(point, radius, color, rotation = 0) {
   canvasCtx.save();
   canvasCtx.translate(point.x, point.y);
@@ -1426,8 +1461,189 @@ function drawSparkle(point, radius, color, rotation = 0) {
   canvasCtx.restore();
 }
 
-function drawHandVisualEffects(hands) {
+function drawJaggedBolt(start, end, color, width, intensity, seed = 0) {
+  if (!start || !end) return;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+  const normalX = -dy / length;
+  const normalY = dx / length;
+  const segments = 8;
   const time = performance.now() / 1000;
+
+  canvasCtx.save();
+  canvasCtx.strokeStyle = color;
+  canvasCtx.lineWidth = width;
+  canvasCtx.shadowColor = color;
+  canvasCtx.shadowBlur = 16 + intensity * 30;
+  canvasCtx.beginPath();
+  canvasCtx.moveTo(start.x, start.y);
+
+  for (let index = 1; index < segments; index++) {
+    const t = index / segments;
+    const wobble = Math.sin(seed + index * 12.341 + time * 9.5) * intensity * 26;
+    const fineWobble = Math.sin(seed * 2 + index * 5.77 + time * 17) * intensity * 10;
+    canvasCtx.lineTo(
+      start.x + dx * t + normalX * (wobble + fineWobble),
+      start.y + dy * t + normalY * (wobble - fineWobble)
+    );
+  }
+
+  canvasCtx.lineTo(end.x, end.y);
+  canvasCtx.stroke();
+  canvasCtx.restore();
+}
+
+function drawExcessiveVideoEffects(hands, signalLevel = 0) {
+  const signal = clamp(signalLevel, 0, 1);
+  const intensity = 0.18 + signal * 0.82;
+  const time = performance.now() / 1000;
+  const width = canvasElement.width;
+  const height = canvasElement.height;
+  const handEffects = [
+    { hand: hands.left, primary: "#00f5d4", secondary: "#9b5cff", fire: "#ff7159" },
+    { hand: hands.right, primary: "#ff7159", secondary: "#ffd166", fire: "#ff3d00" },
+  ];
+
+  captureFxBuffer();
+
+  canvasCtx.save();
+  canvasCtx.globalCompositeOperation = "screen";
+  canvasCtx.globalAlpha = 0.06 + intensity * 0.18;
+  canvasCtx.filter = `hue-rotate(${Math.round(time * 70)}deg) saturate(${1.6 + intensity * 2.2}) contrast(${1.05 + intensity * 0.65})`;
+  canvasCtx.drawImage(fxBufferCanvas, -2 - intensity * 8, 0);
+  canvasCtx.globalAlpha = 0.05 + intensity * 0.14;
+  canvasCtx.filter = `hue-rotate(${-Math.round(time * 95)}deg) saturate(${1.8 + intensity * 2.8})`;
+  canvasCtx.drawImage(fxBufferCanvas, 2 + intensity * 8, Math.sin(time * 18) * intensity * 2.5);
+  canvasCtx.filter = "none";
+
+  canvasCtx.globalAlpha = 0.06 + intensity * 0.12;
+  canvasCtx.fillStyle = "#9b5cff";
+  const scanGap = Math.max(5, 13 - Math.round(signal * 7));
+  for (let y = (time * 38) % scanGap; y < height; y += scanGap) {
+    canvasCtx.fillRect(0, y, width, 1 + signal * 2);
+  }
+
+  const vignette = canvasCtx.createRadialGradient(
+    width * 0.5,
+    height * 0.52,
+    height * 0.2,
+    width * 0.5,
+    height * 0.52,
+    height * 0.82
+  );
+  vignette.addColorStop(0, "rgba(255, 255, 255, 0)");
+  vignette.addColorStop(0.55, colorWithAlpha("#9b5cff", intensity * 0.08));
+  vignette.addColorStop(1, colorWithAlpha("#ff7159", intensity * 0.22));
+  canvasCtx.fillStyle = vignette;
+  canvasCtx.fillRect(0, 0, width, height);
+
+  canvasCtx.globalAlpha = 1;
+  canvasCtx.globalCompositeOperation = "lighter";
+
+  handEffects.forEach(({ hand, primary, secondary, fire }, handIndex) => {
+    if (!hand) return;
+
+    const palm = toCanvasPoint(hand.palm);
+    const wrist = toCanvasPoint(hand.wrist);
+    const handSize = clamp((handScale(hand) || 0.12) * Math.min(width, height), 50, 165);
+    const fingertips = [hand.thumb, hand.index, hand.middle, hand.ring, hand.pinky].filter(Boolean);
+    const particleCount = Math.round(18 + signal * 58);
+
+    canvasCtx.save();
+    canvasCtx.translate(palm.x, palm.y);
+    canvasCtx.rotate(time * (0.65 + signal * 0.55) + handIndex);
+    canvasCtx.scale(1, 0.38);
+    canvasCtx.strokeStyle = colorWithAlpha(secondary, 0.28 + intensity * 0.38);
+    canvasCtx.lineWidth = 2 + intensity * 4;
+    canvasCtx.shadowColor = secondary;
+    canvasCtx.shadowBlur = 22 + intensity * 40;
+    for (let ring = 0; ring < 3; ring++) {
+      const startAngle = time * (0.4 + ring * 0.18);
+      canvasCtx.beginPath();
+      canvasCtx.ellipse(
+        0,
+        0,
+        handSize * (0.78 + ring * 0.28 + signal * 0.22),
+        handSize * (0.78 + ring * 0.28 + signal * 0.22),
+        0,
+        startAngle,
+        startAngle + Math.PI * (1.28 + signal * 0.55)
+      );
+      canvasCtx.stroke();
+    }
+    canvasCtx.restore();
+
+    fingertips.forEach((finger, fingerIndex) => {
+      const tip = toCanvasPoint(finger);
+      drawJaggedBolt(
+        palm,
+        tip,
+        colorWithAlpha(secondary, 0.42 + intensity * 0.46),
+        1.4 + intensity * 3.8,
+        intensity,
+        handIndex * 40 + fingerIndex * 13
+      );
+
+      const flameHeight = handSize * (0.28 + signal * 0.48);
+      const flame = canvasCtx.createRadialGradient(
+        tip.x,
+        tip.y,
+        2,
+        tip.x,
+        tip.y - flameHeight * 0.42,
+        flameHeight
+      );
+      flame.addColorStop(0, colorWithAlpha("#fff5c7", 0.45 + intensity * 0.35));
+      flame.addColorStop(0.35, colorWithAlpha(fire, 0.34 + intensity * 0.3));
+      flame.addColorStop(1, colorWithAlpha("#9b5cff", 0));
+      canvasCtx.fillStyle = flame;
+      canvasCtx.beginPath();
+      canvasCtx.ellipse(
+        tip.x + Math.sin(time * 9 + fingerIndex) * intensity * 8,
+        tip.y - flameHeight * 0.28,
+        flameHeight * 0.32,
+        flameHeight * 0.72,
+        Math.sin(time * 4 + fingerIndex) * 0.35,
+        0,
+        Math.PI * 2
+      );
+      canvasCtx.fill();
+    });
+
+    canvasCtx.fillStyle = colorWithAlpha(primary, 0.55 + intensity * 0.3);
+    canvasCtx.shadowColor = primary;
+    canvasCtx.shadowBlur = 24 + intensity * 30;
+    for (let index = 0; index < particleCount; index++) {
+      const phase = time * (1.4 + signal * 2.1) + index * 1.618 + handIndex * 9;
+      const orbit = handSize * (0.45 + (index % 9) * 0.12 + signal * 0.32);
+      const particleX = palm.x + Math.cos(phase) * orbit + Math.sin(index * 17.19) * intensity * 16;
+      const particleY = palm.y + Math.sin(phase * 0.84) * orbit * 0.72 + Math.cos(index * 7.31) * intensity * 12;
+      const radius = 1.2 + ((index % 5) * 0.55 + signal * 2.8);
+      canvasCtx.beginPath();
+      canvasCtx.arc(particleX, particleY, radius, 0, Math.PI * 2);
+      canvasCtx.fill();
+    }
+
+    const crownY = Math.min(palm.y, wrist.y) - handSize * (0.62 + signal * 0.32);
+    canvasCtx.font = `900 ${Math.round(18 + signal * 16)}px Arial Black, Arial`;
+    canvasCtx.textAlign = "center";
+    canvasCtx.lineWidth = 2 + signal * 2;
+    canvasCtx.strokeStyle = colorWithAlpha("#0a0505", 0.72);
+    canvasCtx.fillStyle = colorWithAlpha("#ffd166", 0.52 + intensity * 0.42);
+    canvasCtx.shadowColor = "#ffd166";
+    canvasCtx.shadowBlur = 18 + intensity * 35;
+    canvasCtx.strokeText("GIGA", palm.x, crownY);
+    canvasCtx.fillText("GIGA", palm.x, crownY);
+  });
+
+  canvasCtx.restore();
+}
+
+function drawHandVisualEffects(hands, signalLevel = 0) {
+  const time = performance.now() / 1000;
+  const signal = clamp(signalLevel, 0, 1);
+  const intensity = 0.42 + signal * 0.58;
   const minCanvasSize = Math.min(canvasElement.width, canvasElement.height);
   const handEffects = [
     {
@@ -1464,18 +1680,18 @@ function drawHandVisualEffects(hands) {
       palm.y,
       handSize * (1.15 + pulse * 0.55)
     );
-    palmGlow.addColorStop(0, colorWithAlpha(primary, 0.42));
-    palmGlow.addColorStop(0.36, colorWithAlpha(secondary, 0.16));
+    palmGlow.addColorStop(0, colorWithAlpha(primary, 0.22 + intensity * 0.24));
+    palmGlow.addColorStop(0.36, colorWithAlpha(secondary, 0.08 + intensity * 0.13));
     palmGlow.addColorStop(1, colorWithAlpha(primary, 0));
     canvasCtx.fillStyle = palmGlow;
     canvasCtx.beginPath();
     canvasCtx.arc(palm.x, palm.y, handSize * 1.75, 0, Math.PI * 2);
     canvasCtx.fill();
 
-    canvasCtx.strokeStyle = colorWithAlpha(primary, 0.68);
-    canvasCtx.lineWidth = 2.5 + pulse * 1.5;
+    canvasCtx.strokeStyle = colorWithAlpha(primary, 0.5 + intensity * 0.24);
+    canvasCtx.lineWidth = 1.8 + pulse * 1.5 + signal * 1.4;
     canvasCtx.shadowColor = primary;
-    canvasCtx.shadowBlur = 22;
+    canvasCtx.shadowBlur = 12 + intensity * 24;
     canvasCtx.beginPath();
     canvasCtx.arc(palm.x, palm.y, handSize * (0.34 + pulse * 0.08), 0, Math.PI * 2);
     canvasCtx.stroke();
@@ -1486,10 +1702,10 @@ function drawHandVisualEffects(hands) {
       const ringRadius = handSize * (0.12 + 0.04 * Math.sin(phase));
       const sparkRadius = 5 + 3 * Math.sin(phase + Math.PI / 2);
 
-      canvasCtx.strokeStyle = colorWithAlpha(secondary, 0.44);
-      canvasCtx.lineWidth = 1.5;
+      canvasCtx.strokeStyle = colorWithAlpha(secondary, 0.24 + intensity * 0.28);
+      canvasCtx.lineWidth = 1.2 + signal * 1.4;
       canvasCtx.shadowColor = secondary;
-      canvasCtx.shadowBlur = 18;
+      canvasCtx.shadowBlur = 10 + intensity * 20;
       canvasCtx.beginPath();
       canvasCtx.moveTo(palm.x, palm.y);
       canvasCtx.quadraticCurveTo(
@@ -1500,12 +1716,12 @@ function drawHandVisualEffects(hands) {
       );
       canvasCtx.stroke();
 
-      canvasCtx.strokeStyle = colorWithAlpha(primary, 0.78);
-      canvasCtx.lineWidth = 2.5;
+      canvasCtx.strokeStyle = colorWithAlpha(primary, 0.55 + intensity * 0.3);
+      canvasCtx.lineWidth = 1.8 + signal * 2.1;
       canvasCtx.beginPath();
       canvasCtx.arc(tip.x, tip.y, ringRadius, 0, Math.PI * 2);
       canvasCtx.stroke();
-      drawSparkle(tip, sparkRadius, colorWithAlpha(secondary, 0.9), phase);
+      drawSparkle(tip, sparkRadius + signal * 4, colorWithAlpha(secondary, 0.62 + intensity * 0.32), phase);
     });
 
     if (fingertips.length >= 3) {
@@ -1706,7 +1922,11 @@ function onResults(results) {
     activeControlKeys.forEach((controlName) => drawControlOverlay(controlName, hands));
     drawGestureOverlays(hands);
     if (showTracking.checked && showOverlayFx?.checked) {
-      drawHandVisualEffects(hands);
+      const fxSignalLevel = updateSmoothedFxSignalLevel();
+      drawHandVisualEffects(hands, fxSignalLevel);
+      if (showExcessiveFx?.checked) {
+        drawExcessiveVideoEffects(hands, fxSignalLevel);
+      }
     }
   } else {
     resetControlFeedback();
